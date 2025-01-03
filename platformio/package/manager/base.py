@@ -12,36 +12,46 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import os
+import subprocess
 from datetime import datetime
 
 import click
 import semantic_version
 
-from platformio import util
-from platformio.commands import PlatformioCLI
+from platformio import fs, util
+from platformio.cli import PlatformioCLI
 from platformio.compat import ci_strings_are_equal
 from platformio.package.exception import ManifestException, MissingPackageManifestError
 from platformio.package.lockfile import LockFile
 from platformio.package.manager._download import PackageManagerDownloadMixin
 from platformio.package.manager._install import PackageManagerInstallMixin
 from platformio.package.manager._legacy import PackageManagerLegacyMixin
-from platformio.package.manager._registry import PackageManageRegistryMixin
+from platformio.package.manager._registry import PackageManagerRegistryMixin
+from platformio.package.manager._symlink import PackageManagerSymlinkMixin
 from platformio.package.manager._uninstall import PackageManagerUninstallMixin
 from platformio.package.manager._update import PackageManagerUpdateMixin
 from platformio.package.manifest.parser import ManifestParserFactory
 from platformio.package.meta import (
     PackageItem,
-    PackageMetaData,
+    PackageMetadata,
     PackageSpec,
     PackageType,
 )
+from platformio.proc import get_pythonexe_path
 from platformio.project.helpers import get_project_cache_dir
 
 
-class BasePackageManager(  # pylint: disable=too-many-public-methods
+class ClickLoggingHandler(logging.Handler):
+    def emit(self, record):
+        click.echo(self.format(record))
+
+
+class BasePackageManager(  # pylint: disable=too-many-public-methods,too-many-instance-attributes
     PackageManagerDownloadMixin,
-    PackageManageRegistryMixin,
+    PackageManagerRegistryMixin,
+    PackageManagerSymlinkMixin,
     PackageManagerInstallMixin,
     PackageManagerUninstallMixin,
     PackageManagerUpdateMixin,
@@ -49,15 +59,36 @@ class BasePackageManager(  # pylint: disable=too-many-public-methods
 ):
     _MEMORY_CACHE = {}
 
-    def __init__(self, pkg_type, package_dir):
+    def __init__(self, pkg_type, package_dir, compatibility=None):
         self.pkg_type = pkg_type
         self.package_dir = package_dir
-        self._MEMORY_CACHE = {}
+        self.compatibility = compatibility
+        self.log = self._setup_logger()
 
+        self._MEMORY_CACHE = {}
         self._lockfile = None
         self._download_dir = None
         self._tmp_dir = None
         self._registry_client = None
+
+    def __repr__(self):
+        return (
+            f"{self.__class__.__name__} <type={self.pkg_type} "
+            f"package_dir={self.package_dir}>"
+        )
+
+    def _setup_logger(self):
+        logger = logging.getLogger(str(self.__class__.__name__).replace("Package", " "))
+        logger.setLevel(logging.INFO)
+        formatter = logging.Formatter("%(name)s: %(message)s")
+        sh = ClickLoggingHandler()
+        sh.setFormatter(formatter)
+        logger.handlers.clear()
+        logger.addHandler(sh)
+        return logger
+
+    def set_log_level(self, level):
+        self.log.setLevel(level)
 
     def lock(self):
         if self._lockfile:
@@ -85,10 +116,10 @@ class BasePackageManager(  # pylint: disable=too-many-public-methods
         self._MEMORY_CACHE.clear()
 
     @staticmethod
-    def is_system_compatible(value):
+    def is_system_compatible(value, custom_system=None):
         if not value or "*" in value:
             return True
-        return util.items_in_list(value, util.get_systype())
+        return util.items_in_list(value, custom_system or util.get_systype())
 
     @staticmethod
     def ensure_dir_exists(path):
@@ -104,12 +135,6 @@ class BasePackageManager(  # pylint: disable=too-many-public-methods
     @property
     def manifest_names(self):
         raise NotImplementedError
-
-    def print_message(self, message, **kwargs):
-        click.echo(
-            "%s: " % str(self.__class__.__name__).replace("Package", " "), nl=False
-        )
-        click.secho(message, **kwargs)
 
     def get_download_dir(self):
         if not self._download_dir:
@@ -163,9 +188,9 @@ class BasePackageManager(  # pylint: disable=too-many-public-methods
                 result = ManifestParserFactory.new_from_file(item).as_dict()
                 self.memcache_set(cache_key, result)
                 return result
-            except ManifestException as e:
+            except ManifestException as exc:
                 if not PlatformioCLI.in_silence():
-                    self.print_message(str(e), fg="yellow")
+                    self.log.warning(click.style(str(exc), fg="yellow"))
         raise MissingPackageManifestError(", ".join(self.manifest_names))
 
     @staticmethod
@@ -174,7 +199,7 @@ class BasePackageManager(  # pylint: disable=too-many-public-methods
 
     def build_metadata(self, pkg_dir, spec, vcs_revision=None):
         manifest = self.load_manifest(pkg_dir)
-        metadata = PackageMetaData(
+        metadata = PackageMetadata(
             type=self.pkg_type,
             name=manifest.get("name"),
             version=manifest.get("version"),
@@ -191,7 +216,7 @@ class BasePackageManager(  # pylint: disable=too-many-public-methods
             metadata.version = self.generate_rand_version()
         return metadata
 
-    def get_installed(self):
+    def get_installed(self):  # pylint: disable=too-many-branches
         if not os.path.isdir(self.package_dir):
             return []
 
@@ -203,14 +228,18 @@ class BasePackageManager(  # pylint: disable=too-many-public-methods
         for name in sorted(os.listdir(self.package_dir)):
             if name.startswith("_tmp_installing"):  # legacy tmp folder
                 continue
-            pkg_dir = os.path.join(self.package_dir, name)
-            if not os.path.isdir(pkg_dir):
+            pkg = None
+            path = os.path.join(self.package_dir, name)
+            if os.path.isdir(path):
+                pkg = PackageItem(path)
+            elif self.is_symlink(path):
+                pkg = self.get_symlinked_package(path)
+            if not pkg:
                 continue
-            pkg = PackageItem(pkg_dir)
             if not pkg.metadata:
                 try:
-                    spec = self.build_legacy_spec(pkg_dir)
-                    pkg.metadata = self.build_metadata(pkg_dir, spec)
+                    spec = self.build_legacy_spec(pkg.path)
+                    pkg.metadata = self.build_metadata(pkg.path, spec)
                 except MissingPackageManifestError:
                     pass
             if not pkg.metadata:
@@ -251,13 +280,17 @@ class BasePackageManager(  # pylint: disable=too-many-public-methods
 
         # external "URL" mismatch
         if spec.external:
-            # local folder mismatch
-            if os.path.abspath(spec.url) == os.path.abspath(pkg.path) or (
-                spec.url.startswith("file://")
-                and os.path.abspath(pkg.path) == os.path.abspath(spec.url[7:])
-            ):
+            # local/symlinked folder mismatch
+            check_conds = [
+                os.path.abspath(spec.uri) == os.path.abspath(pkg.path),
+                spec.uri.startswith("file://")
+                and os.path.abspath(pkg.path) == os.path.abspath(spec.uri[7:]),
+                spec.uri.startswith("symlink://")
+                and os.path.abspath(pkg.path) == os.path.abspath(spec.uri[10:]),
+            ]
+            if any(check_conds):
                 return True
-            if spec.url != pkg.metadata.spec.url:
+            if spec.uri != pkg.metadata.spec.uri:
                 return False
 
         # "owner" mismatch
@@ -271,3 +304,42 @@ class BasePackageManager(  # pylint: disable=too-many-public-methods
             return False
 
         return True
+
+    def get_pkg_dependencies(self, pkg):
+        return self.load_manifest(pkg).get("dependencies")
+
+    @staticmethod
+    def dependency_to_spec(dependency):
+        return PackageSpec(
+            owner=dependency.get("owner"),
+            name=dependency.get("name"),
+            requirements=dependency.get("version"),
+        )
+
+    def call_pkg_script(self, pkg, event):
+        manifest = None
+        try:
+            manifest = self.load_manifest(pkg)
+        except MissingPackageManifestError:
+            pass
+        scripts = (manifest or {}).get("scripts")
+        if not scripts or not isinstance(scripts, dict):
+            return
+        cmd = scripts.get(event)
+        if not cmd:
+            return
+        shell = False
+        if not isinstance(cmd, list):
+            shell = True
+            cmd = [cmd]
+        os.environ["PIO_PYTHON_EXE"] = get_pythonexe_path()
+        with fs.cd(pkg.path):
+            if os.path.isfile(cmd[0]) and cmd[0].endswith(".py"):
+                cmd = [os.environ["PIO_PYTHON_EXE"]] + cmd
+            subprocess.run(
+                " ".join(cmd) if shell else cmd,
+                cwd=pkg.path,
+                shell=shell,
+                env=os.environ,
+                check=True,
+            )

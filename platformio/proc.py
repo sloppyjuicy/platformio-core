@@ -27,7 +27,7 @@ from platformio.compat import (
 )
 
 
-class AsyncPipeBase(object):
+class AsyncPipeBase:
     def __init__(self):
         self._fd_read, self._fd_write = os.pipe()
         self._pipe_reader = os.fdopen(
@@ -62,14 +62,14 @@ class BuildAsyncPipe(AsyncPipeBase):
     def __init__(self, line_callback, data_callback):
         self.line_callback = line_callback
         self.data_callback = data_callback
-        super(BuildAsyncPipe, self).__init__()
+        super().__init__()
 
     def do_reading(self):
         line = ""
         print_immediately = False
 
         for char in iter(lambda: self._pipe_reader.read(1), ""):
-            self._buffer += char
+            # self._buffer += char
 
             if line and char.strip() and line[-3:] == (char * 3):
                 print_immediately = True
@@ -95,7 +95,7 @@ class BuildAsyncPipe(AsyncPipeBase):
 class LineBufferedAsyncPipe(AsyncPipeBase):
     def __init__(self, line_callback):
         self.line_callback = line_callback
-        super(LineBufferedAsyncPipe, self).__init__()
+        super().__init__()
 
     def do_reading(self):
         for line in iter(self._pipe_reader.readline, ""):
@@ -115,8 +115,8 @@ def exec_command(*args, **kwargs):
         try:
             result["out"], result["err"] = p.communicate()
             result["returncode"] = p.returncode
-        except KeyboardInterrupt:
-            raise exception.AbortedByUser()
+        except KeyboardInterrupt as exc:
+            raise exception.AbortedByUser() from exc
         finally:
             for s in ("stdout", "stderr"):
                 if isinstance(kwargs[s], AsyncPipeBase):
@@ -185,9 +185,16 @@ def copy_pythonpath_to_osenv():
 
 
 def where_is_program(program, envpath=None):
-    env = os.environ
+    env = os.environ.copy()
     if envpath:
         env["PATH"] = envpath
+
+    # look up in $PATH
+    for bin_dir in env.get("PATH", "").split(os.pathsep):
+        if os.path.isfile(os.path.join(bin_dir, program)):
+            return os.path.join(bin_dir, program)
+        if IS_WINDOWS and os.path.isfile(os.path.join(bin_dir, "%s.exe" % program)):
+            return os.path.join(bin_dir, "%s.exe" % program)
 
     # try OS's built-in commands
     try:
@@ -196,13 +203,6 @@ def where_is_program(program, envpath=None):
             return result["out"].strip()
     except OSError:
         pass
-
-    # look up in $PATH
-    for bin_dir in env.get("PATH", "").split(os.pathsep):
-        if os.path.isfile(os.path.join(bin_dir, program)):
-            return os.path.join(bin_dir, program)
-        if os.path.isfile(os.path.join(bin_dir, "%s.exe" % program)):
-            return os.path.join(bin_dir, "%s.exe" % program)
 
     return program
 

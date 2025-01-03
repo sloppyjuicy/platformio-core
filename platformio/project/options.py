@@ -14,17 +14,16 @@
 
 # pylint: disable=redefined-builtin, too-many-arguments
 
-import hashlib
 import os
 from collections import OrderedDict
 
 import click
 
 from platformio import fs
-from platformio.compat import IS_WINDOWS, hashlib_encode_data
+from platformio.compat import IS_WINDOWS
 
 
-class ConfigOption(object):  # pylint: disable=too-many-instance-attributes
+class ConfigOption:  # pylint: disable=too-many-instance-attributes,too-many-positional-arguments
     def __init__(
         self,
         scope,
@@ -80,30 +79,6 @@ def ConfigEnvOption(*args, **kwargs):
     return ConfigOption("env", *args, **kwargs)
 
 
-def calculate_path_hash(path):
-    return "%s-%s" % (
-        os.path.basename(path),
-        hashlib.sha1(hashlib_encode_data(path)).hexdigest()[:10],
-    )
-
-
-def expand_dir_templates(path):
-    project_dir = os.getcwd()
-    tpls = {
-        "$PROJECT_DIR": lambda: project_dir,
-        "$PROJECT_HASH": lambda: calculate_path_hash(project_dir),
-    }
-    done = False
-    while not done:
-        done = True
-        for tpl, cb in tpls.items():
-            if tpl not in path:
-                continue
-            path = path.replace(tpl, cb())
-            done = False
-    return path
-
-
 def validate_dir(path):
     if not path:
         return path
@@ -112,9 +87,7 @@ def validate_dir(path):
         return path
     if path.startswith("~"):
         path = fs.expanduser(path)
-    if "$" in path:
-        path = expand_dir_templates(path)
-    return fs.normalize_path(path)
+    return os.path.abspath(path)
 
 
 def get_default_core_dir():
@@ -133,6 +106,12 @@ ProjectOptions = OrderedDict(
             #
             # [platformio]
             #
+            ConfigPlatformioOption(
+                group="generic",
+                name="name",
+                description="A project name",
+                default=lambda: os.path.basename(os.getcwd()),
+            ),
             ConfigPlatformioOption(
                 group="generic",
                 name="description",
@@ -235,7 +214,7 @@ ProjectOptions = OrderedDict(
                     "external library dependencies"
                 ),
                 sysenvvar="PLATFORMIO_WORKSPACE_DIR",
-                default=os.path.join("$PROJECT_DIR", ".pio"),
+                default=os.path.join("${PROJECT_DIR}", ".pio"),
                 validate=validate_dir,
             ),
             ConfigPlatformioOption(
@@ -269,7 +248,7 @@ ProjectOptions = OrderedDict(
                     "System automatically adds this path to CPPPATH scope"
                 ),
                 sysenvvar="PLATFORMIO_INCLUDE_DIR",
-                default=os.path.join("$PROJECT_DIR", "include"),
+                default=os.path.join("${PROJECT_DIR}", "include"),
                 validate=validate_dir,
             ),
             ConfigPlatformioOption(
@@ -280,7 +259,7 @@ ProjectOptions = OrderedDict(
                     "project C/C++ source files"
                 ),
                 sysenvvar="PLATFORMIO_SRC_DIR",
-                default=os.path.join("$PROJECT_DIR", "src"),
+                default=os.path.join("${PROJECT_DIR}", "src"),
                 validate=validate_dir,
             ),
             ConfigPlatformioOption(
@@ -288,7 +267,7 @@ ProjectOptions = OrderedDict(
                 name="lib_dir",
                 description="A storage for the custom/private project libraries",
                 sysenvvar="PLATFORMIO_LIB_DIR",
-                default=os.path.join("$PROJECT_DIR", "lib"),
+                default=os.path.join("${PROJECT_DIR}", "lib"),
                 validate=validate_dir,
             ),
             ConfigPlatformioOption(
@@ -299,7 +278,7 @@ ProjectOptions = OrderedDict(
                     "file system (SPIFFS, etc.)"
                 ),
                 sysenvvar="PLATFORMIO_DATA_DIR",
-                default=os.path.join("$PROJECT_DIR", "data"),
+                default=os.path.join("${PROJECT_DIR}", "data"),
                 validate=validate_dir,
             ),
             ConfigPlatformioOption(
@@ -310,7 +289,7 @@ ProjectOptions = OrderedDict(
                     "test source files"
                 ),
                 sysenvvar="PLATFORMIO_TEST_DIR",
-                default=os.path.join("$PROJECT_DIR", "test"),
+                default=os.path.join("${PROJECT_DIR}", "test"),
                 validate=validate_dir,
             ),
             ConfigPlatformioOption(
@@ -318,7 +297,7 @@ ProjectOptions = OrderedDict(
                 name="boards_dir",
                 description="A storage for custom board manifests",
                 sysenvvar="PLATFORMIO_BOARDS_DIR",
-                default=os.path.join("$PROJECT_DIR", "boards"),
+                default=os.path.join("${PROJECT_DIR}", "boards"),
                 validate=validate_dir,
             ),
             ConfigPlatformioOption(
@@ -326,7 +305,7 @@ ProjectOptions = OrderedDict(
                 name="monitor_dir",
                 description="A storage for custom monitor filters",
                 sysenvvar="PLATFORMIO_MONITOR_DIR",
-                default=os.path.join("$PROJECT_DIR", "monitor"),
+                default=os.path.join("${PROJECT_DIR}", "monitor"),
                 validate=validate_dir,
             ),
             ConfigPlatformioOption(
@@ -337,7 +316,7 @@ ProjectOptions = OrderedDict(
                     "synchronize extra files between remote machines"
                 ),
                 sysenvvar="PLATFORMIO_SHARED_DIR",
-                default=os.path.join("$PROJECT_DIR", "shared"),
+                default=os.path.join("${PROJECT_DIR}", "shared"),
                 validate=validate_dir,
             ),
             #
@@ -403,7 +382,7 @@ ProjectOptions = OrderedDict(
                 group="build",
                 name="build_type",
                 description="Project build configuration",
-                type=click.Choice(["release", "debug"]),
+                type=click.Choice(["release", "test", "debug"]),
                 default="release",
             ),
             ConfigEnvOption(
@@ -419,13 +398,14 @@ ProjectOptions = OrderedDict(
             ),
             ConfigEnvOption(
                 group="build",
-                name="src_build_flags",
+                name="build_src_flags",
+                oldnames=["src_build_flags"],
                 description=(
                     "The same as `build_flags` but configures flags the only for "
-                    "project source files (`src` folder)"
+                    "project source files in the `src` folder"
                 ),
                 multiple=True,
-                sysenvvar="PLATFORMIO_SRC_BUILD_FLAGS",
+                sysenvvar="PLATFORMIO_BUILD_SRC_FLAGS",
                 buildenvvar="SRC_BUILD_FLAGS",
             ),
             ConfigEnvOption(
@@ -438,13 +418,14 @@ ProjectOptions = OrderedDict(
             ),
             ConfigEnvOption(
                 group="build",
-                name="src_filter",
+                name="build_src_filter",
+                oldnames=["src_filter"],
                 description=(
-                    "Control which source files should be included/excluded from a "
-                    "build process"
+                    "Control which source files from the `src` folder should "
+                    "be included/excluded from a build process"
                 ),
                 multiple=True,
-                sysenvvar="PLATFORMIO_SRC_FILTER",
+                sysenvvar="PLATFORMIO_BUILD_SRC_FILTER",
                 buildenvvar="SRC_FILTER",
                 default="+<*> -<.git/> -<.svn/>",
             ),
@@ -519,6 +500,13 @@ ProjectOptions = OrderedDict(
             ),
             ConfigEnvOption(
                 group="monitor",
+                name="monitor_parity",
+                description="A monitor parity checking",
+                type=click.Choice(["N", "E", "O", "S", "M"]),
+                default="N",
+            ),
+            ConfigEnvOption(
+                group="monitor",
                 name="monitor_filters",
                 description=(
                     "Apply the filters and text transformations to monitor output"
@@ -539,12 +527,30 @@ ProjectOptions = OrderedDict(
             ),
             ConfigEnvOption(
                 group="monitor",
-                name="monitor_flags",
-                description=(
-                    "The extra flags and options for `platformio device monitor` "
-                    "command"
-                ),
-                multiple=True,
+                name="monitor_eol",
+                description="A monitor end of line mode",
+                type=click.Choice(["CR", "LF", "CRLF"]),
+                default="CRLF",
+            ),
+            ConfigEnvOption(
+                group="monitor",
+                name="monitor_raw",
+                description="Disable encodings/transformations of device output",
+                type=click.BOOL,
+                default=False,
+            ),
+            ConfigEnvOption(
+                group="monitor",
+                name="monitor_echo",
+                description="Enable a monitor local echo",
+                type=click.BOOL,
+                default=False,
+            ),
+            ConfigEnvOption(
+                group="monitor",
+                name="monitor_encoding",
+                description="Custom encoding (e.g. hexlify, Latin-1, UTF-8)",
+                default="UTF-8",
             ),
             # Library
             ConfigEnvOption(
@@ -617,10 +623,10 @@ ProjectOptions = OrderedDict(
             ),
             ConfigEnvOption(
                 group="check",
-                name="check_patterns",
+                name="check_src_filters",
+                oldnames=["check_patterns"],
                 description=(
-                    "Configure a list of target files or directories for checking "
-                    "(Unix shell-style wildcards)"
+                    "Configure a list of target files or directories for checking"
                 ),
                 multiple=True,
             ),
@@ -648,6 +654,13 @@ ProjectOptions = OrderedDict(
             # Test
             ConfigEnvOption(
                 group="test",
+                name="test_framework",
+                description="A unit testing framework",
+                type=click.Choice(["doctest", "googletest", "unity", "custom"]),
+                default="unity",
+            ),
+            ConfigEnvOption(
+                group="test",
                 name="test_filter",
                 description="Process tests where the name matches specified patterns",
                 multiple=True,
@@ -666,20 +679,27 @@ ProjectOptions = OrderedDict(
             ConfigEnvOption(
                 group="test",
                 name="test_speed",
-                description="A connection speed (baud rate) to communicate with a target device",
+                description="A connection speed (baud rate) to communicate with "
+                "a target device",
                 type=click.INT,
+                default=115200,
             ),
             ConfigEnvOption(
                 group="test",
-                name="test_transport",
-                description="A transport to communicate with a target device",
-            ),
-            ConfigEnvOption(
-                group="test",
-                name="test_build_project_src",
-                description="Build project source code in a pair with test code",
+                name="test_build_src",
+                oldnames=["test_build_project_src"],
+                description="Build main source code in pair with a test code",
                 type=click.BOOL,
                 default=False,
+            ),
+            ConfigEnvOption(
+                group="test",
+                name="test_testing_command",
+                multiple=True,
+                description=(
+                    "A custom testing command that runs test cases "
+                    "and returns results to the standard output"
+                ),
             ),
             # Debug
             ConfigEnvOption(

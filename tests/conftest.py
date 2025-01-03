@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import email
+import functools
 import imaplib
 import os
 import time
@@ -20,7 +21,9 @@ import time
 import pytest
 from click.testing import CliRunner
 
-from platformio.clients import http
+from platformio import http
+from platformio.package.meta import PackageSpec, PackageType
+from platformio.registry.client import RegistryClient
 
 
 def pytest_configure(config):
@@ -37,8 +40,10 @@ def validate_cliresult():
 
 
 @pytest.fixture(scope="session")
-def clirunner(request):
+def clirunner(request, tmpdir_factory):
+    cache_dir = tmpdir_factory.mktemp(".cache")
     backup_env_vars = {
+        "PLATFORMIO_CACHE_DIR": {"new": str(cache_dir)},
         "PLATFORMIO_WORKSPACE_DIR": {"new": None},
     }
     for key, item in backup_env_vars.items():
@@ -61,16 +66,26 @@ def clirunner(request):
     return CliRunner()
 
 
-@pytest.fixture(scope="module")
-def isolated_pio_core(request, tmpdir_factory):
+def _isolated_pio_core(request, tmpdir_factory):
     core_dir = tmpdir_factory.mktemp(".platformio")
     os.environ["PLATFORMIO_CORE_DIR"] = str(core_dir)
 
     def fin():
-        del os.environ["PLATFORMIO_CORE_DIR"]
+        if "PLATFORMIO_CORE_DIR" in os.environ:
+            del os.environ["PLATFORMIO_CORE_DIR"]
 
     request.addfinalizer(fin)
     return core_dir
+
+
+@pytest.fixture(scope="module")
+def isolated_pio_core(request, tmpdir_factory):
+    return _isolated_pio_core(request, tmpdir_factory)
+
+
+@pytest.fixture(scope="function")
+def func_isolated_pio_core(request, tmpdir_factory):
+    return _isolated_pio_core(request, tmpdir_factory)
 
 
 @pytest.fixture(scope="function")
@@ -81,9 +96,9 @@ def without_internet(monkeypatch):
 @pytest.fixture
 def receive_email():  # pylint:disable=redefined-outer-name, too-many-locals
     def _receive_email(from_who):
-        test_email = os.environ.get("TEST_EMAIL_LOGIN")
-        test_password = os.environ.get("TEST_EMAIL_PASSWORD")
-        imap_server = os.environ.get("TEST_EMAIL_IMAP_SERVER") or "imap.gmail.com"
+        test_email = os.environ["TEST_EMAIL_LOGIN"]
+        test_password = os.environ["TEST_EMAIL_PASSWORD"]
+        imap_server = os.environ["TEST_EMAIL_IMAP_SERVER"]
 
         def get_body(msg):
             if msg.is_multipart():
@@ -119,3 +134,17 @@ def receive_email():  # pylint:disable=redefined-outer-name, too-many-locals
         return result
 
     return _receive_email
+
+
+@pytest.fixture(scope="session")
+def get_pkg_latest_version():
+    @functools.lru_cache()
+    def wrap(spec, pkg_type=None):
+        if not isinstance(spec, PackageSpec):
+            spec = PackageSpec(spec)
+        pkg_type = pkg_type or PackageType.LIBRARY
+        client = RegistryClient()
+        pkg = client.get_package(pkg_type, spec.owner, spec.name)
+        return pkg["version"]["name"]
+
+    return wrap

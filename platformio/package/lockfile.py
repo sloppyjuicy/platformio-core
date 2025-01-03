@@ -15,7 +15,7 @@
 import os
 from time import sleep, time
 
-from platformio.exception import PlatformioException
+from platformio.exception import UserSideException
 
 LOCKFILE_TIMEOUT = 3600  # in seconds, 1 hour
 LOCKFILE_DELAY = 0.2
@@ -36,15 +36,15 @@ except ImportError:
         LOCKFILE_CURRENT_INTERFACE = None
 
 
-class LockFileExists(PlatformioException):
+class LockFileExists(UserSideException):
     pass
 
 
-class LockFileTimeoutError(PlatformioException):
+class LockFileTimeoutError(UserSideException):
     pass
 
 
-class LockFile(object):
+class LockFile:
     def __init__(self, path, timeout=LOCKFILE_TIMEOUT, delay=LOCKFILE_DELAY):
         self.timeout = timeout
         self.delay = delay
@@ -69,10 +69,13 @@ class LockFile(object):
             if LOCKFILE_CURRENT_INTERFACE == LOCKFILE_INTERFACE_FCNTL:
                 fcntl.flock(self._fp.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             elif LOCKFILE_CURRENT_INTERFACE == LOCKFILE_INTERFACE_MSVCRT:
-                msvcrt.locking(self._fp.fileno(), msvcrt.LK_NBLCK, 1)
-        except IOError:
+                msvcrt.locking(  # pylint: disable=used-before-assignment
+                    self._fp.fileno(), msvcrt.LK_NBLCK, 1
+                )
+        except (BlockingIOError, IOError) as exc:
+            self._fp.close()
             self._fp = None
-            raise LockFileExists
+            raise LockFileExists from exc
         return True
 
     def _unlock(self):

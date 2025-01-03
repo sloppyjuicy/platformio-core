@@ -26,11 +26,10 @@ from platformio.proc import where_is_program
 
 
 class DebugServerProcess(DebugBaseProcess):
-
     STD_BUFFER_SIZE = 1024
 
     def __init__(self, debug_config):
-        super(DebugServerProcess, self).__init__()
+        super().__init__()
         self.debug_config = debug_config
         self._ready = False
         self._std_buffer = {"out": b"", "err": b""}
@@ -63,7 +62,9 @@ class DebugServerProcess(DebugBaseProcess):
 
         openocd_pipe_allowed = all(
             [
-                not self.debug_config.env_options.get("debug_port"),
+                not self.debug_config.env_options.get(
+                    "debug_port", self.debug_config.tool_settings.get("port")
+                ),
                 "gdb" in self.debug_config.client_executable_path,
                 "openocd" in server_executable,
             ]
@@ -134,7 +135,7 @@ class DebugServerProcess(DebugBaseProcess):
         return self._ready
 
     def stdout_data_received(self, data):
-        super(DebugServerProcess, self).stdout_data_received(
+        super().stdout_data_received(
             escape_gdbmi_stream("@", data) if is_gdbmi_mode() else data
         )
         self._std_buffer["out"] += data
@@ -142,7 +143,7 @@ class DebugServerProcess(DebugBaseProcess):
         self._std_buffer["out"] = self._std_buffer["out"][-1 * self.STD_BUFFER_SIZE :]
 
     def stderr_data_received(self, data):
-        super(DebugServerProcess, self).stderr_data_received(data)
+        super().stderr_data_received(data)
         self._std_buffer["err"] += data
         self._check_ready_by_pattern(self._std_buffer["err"])
         self._std_buffer["err"] = self._std_buffer["err"][-1 * self.STD_BUFFER_SIZE :]

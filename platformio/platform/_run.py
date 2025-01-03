@@ -13,38 +13,38 @@
 # limitations under the License.
 
 import base64
+import json
 import os
 import re
 import sys
+from urllib.parse import quote
 
 import click
 
 from platformio import app, fs, proc, telemetry
-from platformio.compat import hashlib_encode_data, is_bytes
+from platformio.compat import hashlib_encode_data
 from platformio.package.manager.core import get_core_package_dir
 from platformio.platform.exception import BuildScriptNotFound
-
-try:
-    from urllib.parse import quote
-except ImportError:
-    from urllib import quote
+from platformio.run.helpers import KNOWN_CLEAN_TARGETS, KNOWN_FULLCLEAN_TARGETS
 
 
-class PlatformRunMixin(object):
-
+class PlatformRunMixin:
     LINE_ERROR_RE = re.compile(r"(^|\s+)error:?\s+", re.I)
 
     @staticmethod
     def encode_scons_arg(value):
-        data = base64.urlsafe_b64encode(hashlib_encode_data(value))
-        return data.decode() if is_bytes(data) else data
+        if isinstance(value, (list, tuple, dict)):
+            value = json.dumps(value)
+        return base64.urlsafe_b64encode(hashlib_encode_data(value)).decode()
 
     @staticmethod
     def decode_scons_arg(data):
-        value = base64.urlsafe_b64decode(data)
-        return value.decode() if is_bytes(value) else value
+        value = base64.urlsafe_b64decode(data).decode()
+        if value.startswith(("[", "{")):
+            value = json.loads(value)
+        return value
 
-    def run(  # pylint: disable=too-many-arguments
+    def run(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self, variables, targets, silent, verbose, jobs
     ):
         assert isinstance(variables, dict)
@@ -52,41 +52,20 @@ class PlatformRunMixin(object):
 
         self.ensure_engine_compatible()
 
-        options = self.config.items(env=variables["pioenv"], as_dict=True)
-        if "framework" in options:
-            # support PIO Core 3.0 dev/platforms
-            options["pioframework"] = options["framework"]
-        self.configure_default_packages(options, targets)
-        self.autoinstall_runtime_packages()
-
-        self._report_non_sensitive_data(options, targets)
-
         self.silent = silent
         self.verbose = verbose or app.get_setting("force_verbose")
-
-        if "clean" in targets:
-            targets = ["-c", "."]
-
-        variables["platform_manifest"] = self.manifest_path
 
         if "build_script" not in variables:
             variables["build_script"] = self.get_build_script()
         if not os.path.isfile(variables["build_script"]):
             raise BuildScriptNotFound(variables["build_script"])
 
+        telemetry.log_platform_run(self, self.config, variables["pioenv"], targets)
         result = self._run_scons(variables, targets, jobs)
+
         assert "returncode" in result
 
         return result
-
-    def _report_non_sensitive_data(self, options, targets):
-        topts = options.copy()
-        topts["platform_packages"] = [
-            dict(name=item["name"], version=item["version"])
-            for item in self.dump_used_packages()
-        ]
-        topts["platform"] = {"name": self.name, "version": self.version}
-        telemetry.send_run_environment(topts, targets)
 
     def _run_scons(self, variables, targets, jobs):
         scons_dir = get_core_package_dir("tool-scons")
@@ -100,16 +79,22 @@ class PlatformRunMixin(object):
             "--sconstruct",
             os.path.join(fs.get_source_dir(), "builder", "main.py"),
         ]
-        args.append("PIOVERBOSE=%d" % (1 if self.verbose else 0))
+        args.append("PIOVERBOSE=%d" % int(self.verbose))
         # pylint: disable=protected-access
-        args.append("ISATTY=%d" % (1 if click._compat.isatty(sys.stdout) else 0))
-        args += targets
-
+        args.append("ISATTY=%d" % int(click._compat.isatty(sys.stdout)))
         # encode and append variables
         for key, value in variables.items():
             args.append("%s=%s" % (key.upper(), self.encode_scons_arg(value)))
 
-        proc.copy_pythonpath_to_osenv()
+        if set(KNOWN_CLEAN_TARGETS + KNOWN_FULLCLEAN_TARGETS) & set(targets):
+            args.append("--clean")
+            args.append(
+                "FULLCLEAN=%d"
+                % (1 if set(KNOWN_FULLCLEAN_TARGETS) & set(targets) else 0)
+            )
+        elif targets:
+            args.extend(targets)
+
         # force SCons output to Unicode
         os.environ["PYTHONIOENCODING"] = "utf-8"
 
@@ -131,9 +116,9 @@ class PlatformRunMixin(object):
                 args,
                 stdout=proc.BuildAsyncPipe(
                     line_callback=self._on_stdout_line,
-                    data_callback=lambda data: None
-                    if self.silent
-                    else _write_and_flush(sys.stdout, data),
+                    data_callback=lambda data: (
+                        None if self.silent else _write_and_flush(sys.stdout, data)
+                    ),
                 ),
                 stderr=proc.BuildAsyncPipe(
                     line_callback=self._on_stderr_line,
