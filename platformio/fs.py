@@ -24,11 +24,11 @@ import sys
 
 import click
 
-from platformio import exception, proc
+from platformio import exception
 from platformio.compat import IS_WINDOWS
 
 
-class cd(object):
+class cd:
     def __init__(self, new_path):
         self.new_path = new_path
         self.prev_path = os.getcwd()
@@ -50,12 +50,16 @@ def get_source_dir():
     return os.path.dirname(curpath)
 
 
+def get_assets_dir():
+    return os.path.join(get_source_dir(), "assets")
+
+
 def load_json(file_path):
     try:
         with open(file_path, mode="r", encoding="utf8") as f:
             return json.load(f)
-    except ValueError:
-        raise exception.InvalidJSONFile(file_path)
+    except ValueError as exc:
+        raise exception.InvalidJSONFile(file_path) from exc
 
 
 def humanize_file_size(filesize):
@@ -97,6 +101,12 @@ def calculate_folder_size(path):
     return result
 
 
+def get_platformio_udev_rules_path():
+    return os.path.abspath(
+        os.path.join(get_assets_dir(), "system", "99-platformio-udev.rules")
+    )
+
+
 def ensure_udev_rules():
     from platformio.util import get_systype  # pylint: disable=import-outside-toplevel
 
@@ -119,9 +129,7 @@ def ensure_udev_rules():
     if not any(os.path.isfile(p) for p in installed_rules):
         raise exception.MissedUdevRules
 
-    origin_path = os.path.abspath(
-        os.path.join(get_source_dir(), "..", "scripts", "99-platformio-udev.rules")
-    )
+    origin_path = get_platformio_udev_rules_path()
     if not os.path.isfile(origin_path):
         return None
 
@@ -146,58 +154,46 @@ def path_endswith_ext(path, extensions):
 
 
 def match_src_files(src_dir, src_filter=None, src_exts=None, followlinks=True):
-    def _append_build_item(items, item, src_dir):
+    def _add_candidate(items, item, src_dir):
         if not src_exts or path_endswith_ext(item, src_exts):
             items.add(os.path.relpath(item, src_dir))
+
+    def _find_candidates(pattern):
+        candidates = set()
+        for item in glob.glob(
+            os.path.join(glob.escape(src_dir), pattern), recursive=True
+        ):
+            if not os.path.isdir(item):
+                _add_candidate(candidates, item, src_dir)
+                continue
+            for root, dirs, files in os.walk(item, followlinks=followlinks):
+                for d in dirs if not followlinks else []:
+                    if os.path.islink(os.path.join(root, d)):
+                        _add_candidate(candidates, os.path.join(root, d), src_dir)
+                for f in files:
+                    _add_candidate(candidates, os.path.join(root, f), src_dir)
+        return candidates
 
     src_filter = src_filter or ""
     if isinstance(src_filter, (list, tuple)):
         src_filter = " ".join(src_filter)
 
-    matches = set()
+    result = set()
     # correct fs directory separator
     src_filter = src_filter.replace("/", os.sep).replace("\\", os.sep)
-    for (action, pattern) in re.findall(r"(\+|\-)<([^>]+)>", src_filter):
-        items = set()
-        for item in glob.glob(
-            os.path.join(glob.escape(src_dir), pattern), recursive=True
-        ):
-            if os.path.isdir(item):
-                for root, _, files in os.walk(item, followlinks=followlinks):
-                    for f in files:
-                        _append_build_item(items, os.path.join(root, f), src_dir)
-            else:
-                _append_build_item(items, item, src_dir)
+    for action, pattern in re.findall(r"(\+|\-)<([^>]+)>", src_filter):
+        candidates = _find_candidates(pattern)
         if action == "+":
-            matches |= items
+            result |= candidates
         else:
-            matches -= items
-    return sorted(list(matches))
+            result -= candidates
+    return sorted(list(result))
 
 
 def to_unix_path(path):
     if not IS_WINDOWS or not path:
         return path
-    return re.sub(r"[\\]+", "/", path)
-
-
-def normalize_path(path):
-    path = os.path.abspath(path)
-    if not IS_WINDOWS or not path.startswith("\\\\"):
-        return path
-    try:
-        result = proc.exec_command(["net", "use"])
-        if result["returncode"] != 0:
-            return path
-        share_re = re.compile(r"\s([A-Z]\:)\s+(\\\\[^\s]+)")
-        for line in result["out"].split("\n"):
-            share = share_re.search(line)
-            if not share:
-                continue
-            path = path.replace(share.group(2), share.group(1))
-    except OSError:
-        pass
-    return path
+    return path.replace("\\", "/")
 
 
 def expanduser(path):
@@ -214,17 +210,20 @@ def change_filemtime(path, mtime):
 
 
 def rmtree(path):
-    def _onerror(func, path, __):
+    def _onexc(func, path, _):
         try:
             st_mode = os.stat(path).st_mode
             if st_mode & stat.S_IREAD:
                 os.chmod(path, st_mode | stat.S_IWRITE)
             func(path)
-        except Exception as e:  # pylint: disable=broad-except
+        except Exception as exc:  # pylint: disable=broad-except
             click.secho(
-                "%s \nPlease manually remove the file `%s`" % (str(e), path),
+                "%s \nPlease manually remove the file `%s`" % (str(exc), path),
                 fg="red",
                 err=True,
             )
 
-    return shutil.rmtree(path, onerror=_onerror)
+    # pylint: disable=unexpected-keyword-arg, deprecated-argument
+    if sys.version_info < (3, 12):
+        return shutil.rmtree(path, onerror=_onexc)
+    return shutil.rmtree(path, onexc=_onexc)

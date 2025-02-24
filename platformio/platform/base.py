@@ -13,12 +13,10 @@
 # limitations under the License.
 
 import os
-import subprocess
 
-import click
 import semantic_version
 
-from platformio import __version__, fs, proc
+from platformio import __version__, fs
 from platformio.package.manager.tool import ToolPackageManager
 from platformio.package.version import pepver_to_semver
 from platformio.platform._packages import PlatformPackagesMixin
@@ -31,12 +29,12 @@ from platformio.project.config import ProjectConfig
 class PlatformBase(  # pylint: disable=too-many-instance-attributes,too-many-public-methods
     PlatformPackagesMixin, PlatformRunMixin
 ):
-
     CORE_SEMVER = pepver_to_semver(__version__)
     _BOARDS_CACHE = {}
 
     def __init__(self, manifest_path):
         self.manifest_path = manifest_path
+        self.project_env = None  # set by factory.from_env(env)
         self.silent = False
         self.verbose = False
 
@@ -104,18 +102,16 @@ class PlatformBase(  # pylint: disable=too-many-instance-attributes,too-many-pub
             packages[spec.name].update(**options)
         return packages
 
-    @property
-    def python_packages(self):
-        return self._manifest.get("pythonPackages")
-
     def ensure_engine_compatible(self):
         if not self.engines or "platformio" not in self.engines:
             return True
         core_spec = semantic_version.SimpleSpec(self.engines["platformio"])
         if self.CORE_SEMVER in core_spec:
             return True
-        # PIO Core 5 is compatible with dev-platforms for PIO Core 2.0, 3.0, 4.0
-        if any(semantic_version.Version.coerce(str(v)) in core_spec for v in (2, 3, 4)):
+        # PIO Core 6 is compatible with dev-platforms for PIO Core 2.0, 3.0, 4.0
+        if any(
+            semantic_version.Version.coerce(str(v)) in core_spec for v in (2, 3, 4, 5)
+        ):
             return True
         raise IncompatiblePlatform(self.name, str(self.CORE_SEMVER), str(core_spec))
 
@@ -173,15 +169,22 @@ class PlatformBase(  # pylint: disable=too-many-instance-attributes,too-many-pub
         return self._BOARDS_CACHE[id_] if id_ else self._BOARDS_CACHE
 
     def board_config(self, id_):
+        assert id_
         return self.get_boards(id_)
 
     def get_package_type(self, name):
         return self.packages[name].get("type")
 
-    def configure_default_packages(self, options, targets):
+    def configure_project_packages(self, env, targets=None):
+        options = self.config.items(env=env, as_dict=True)
+        if "framework" in options:
+            # support PIO Core 3.0 dev/platforms
+            options["pioframework"] = options["framework"]
         # override user custom packages
         self._custom_packages = options.get("platform_packages")
+        self.configure_default_packages(options, targets or [])
 
+    def configure_default_packages(self, options, targets):
         # enable used frameworks
         for framework in options.get("framework", []):
             if not self.frameworks:
@@ -206,6 +209,15 @@ class PlatformBase(  # pylint: disable=too-many-instance-attributes,too-many-pub
     def configure_debug_session(self, debug_config):
         raise NotImplementedError
 
+    def generate_sample_code(self, project_config, environment):
+        raise NotImplementedError
+
+    def on_installed(self):
+        pass
+
+    def on_uninstalled(self):
+        pass
+
     def get_lib_storages(self):
         storages = {}
         for opts in (self.frameworks or {}).values():
@@ -226,43 +238,3 @@ class PlatformBase(  # pylint: disable=too-many-instance-attributes,too-many-pub
                 storages[libcore_dir] = "%s-core-%s" % (opts["package"], item)
 
         return [dict(name=name, path=path) for path, name in storages.items()]
-
-    def on_installed(self):
-        pass
-
-    def on_uninstalled(self):
-        pass
-
-    def install_python_packages(self):
-        if not self.python_packages:
-            return None
-        click.echo(
-            "Installing Python packages: %s"
-            % ", ".join(list(self.python_packages.keys())),
-        )
-        args = [proc.get_pythonexe_path(), "-m", "pip", "install", "--upgrade"]
-        for name, requirements in self.python_packages.items():
-            if any(c in requirements for c in ("<", ">", "=")):
-                args.append("%s%s" % (name, requirements))
-            else:
-                args.append("%s==%s" % (name, requirements))
-        try:
-            return subprocess.call(args) == 0
-        except Exception as e:  # pylint: disable=broad-except
-            click.secho(
-                "Could not install Python packages -> %s" % e, fg="red", err=True
-            )
-        return None
-
-    def uninstall_python_packages(self):
-        if not self.python_packages:
-            return
-        click.echo("Uninstalling Python packages")
-        args = [proc.get_pythonexe_path(), "-m", "pip", "uninstall", "--yes"]
-        args.extend(list(self.python_packages.keys()))
-        try:
-            subprocess.call(args) == 0
-        except Exception as e:  # pylint: disable=broad-except
-            click.secho(
-                "Could not install Python packages -> %s" % e, fg="red", err=True
-            )

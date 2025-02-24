@@ -23,31 +23,7 @@ from platformio import (
     __url__,
     __version__,
 )
-from platformio.compat import PY2
-
-
-minimal_requirements = [
-    "bottle==0.12.*",
-    "click>=8,<9,!=8.0.2",
-    "colorama",
-    "marshmallow%s" % (">=2,<3" if PY2 else ">=2,<4"),
-    "pyelftools>=0.27,<1",
-    "pyserial==3.*",
-    "requests==2.*",
-    "semantic_version==2.8.*",
-    "tabulate==0.8.*",
-]
-
-if not PY2:
-    minimal_requirements.append("zeroconf==0.38.*")
-
-home_requirements = [
-    "aiofiles==0.8.*",
-    "ajsonrpc==1.*",
-    "starlette==0.18.*",
-    "uvicorn==0.17.*",
-    "wsproto==1.0.*",
-]
+from platformio.dependencies import get_pip_dependencies
 
 setup(
     name=__title__,
@@ -58,16 +34,18 @@ setup(
     author_email=__email__,
     url=__url__,
     license=__license__,
-    install_requires=minimal_requirements + ([] if PY2 else home_requirements),
-    packages=find_packages(exclude=["tests.*", "tests"]) + ["scripts"],
+    install_requires=get_pip_dependencies(),
+    python_requires=">=3.6",
+    packages=find_packages(include=["platformio", "platformio.*"]),
     package_data={
         "platformio": [
-            "project/tpls/*/.*.tpl",
-            "project/tpls/*/*.tpl",
-            "project/tpls/*/*/*.tpl",
-            "project/tpls/*/.*/*.tpl",
-        ],
-        "scripts": ["99-platformio-udev.rules"],
+            "assets/system/99-platformio-udev.rules",
+            "project/integration/tpls/*/*.tpl",
+            "project/integration/tpls/*/.*.tpl",  # include hidden files
+            "project/integration/tpls/*/.*/*.tpl",  # include hidden folders
+            "project/integration/tpls/*/*/*.tpl",  # NetBeans
+            "project/integration/tpls/*/*/*/*.tpl",  # NetBeans
+        ]
     },
     entry_points={
         "console_scripts": [

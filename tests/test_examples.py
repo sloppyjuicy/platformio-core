@@ -19,10 +19,10 @@ from glob import glob
 import pytest
 
 from platformio import fs, proc
-from platformio.compat import PY2
 from platformio.package.manager.platform import PlatformPackageManager
 from platformio.platform.factory import PlatformFactory
 from platformio.project.config import ProjectConfig
+from platformio.project.exception import ProjectError
 
 
 def pytest_generate_tests(metafunc):
@@ -48,7 +48,7 @@ def pytest_generate_tests(metafunc):
         for root, _, files in os.walk(examples_dir):
             if "platformio.ini" not in files or ".skiptest" in files:
                 continue
-            if "zephyr-" in root and PY2:
+            if "mbed-legacy-examples" in root:
                 continue
             group = os.path.basename(root)
             if "-" in group:
@@ -67,6 +67,13 @@ def pytest_generate_tests(metafunc):
 def test_run(pioproject_dir):
     with fs.cd(pioproject_dir):
         config = ProjectConfig()
+
+        # temporary fix for unreleased dev-platforms with broken env name
+        try:
+            config.validate()
+        except ProjectError as exc:
+            pytest.skip(str(exc))
+
         build_dir = config.get("platformio", "build_dir")
         if os.path.isdir(build_dir):
             fs.rmtree(build_dir)

@@ -12,28 +12,32 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from __future__ import absolute_import
-
-import json
+import datetime
+import functools
 import math
 import os
 import platform
 import re
 import shutil
 import time
-from functools import wraps
-from glob import glob
 
 import click
-import zeroconf
 
-from platformio import __version__, exception, proc
-from platformio.compat import IS_MACOS, IS_WINDOWS
-from platformio.fs import cd, load_json  # pylint: disable=unused-import
-from platformio.proc import exec_command  # pylint: disable=unused-import
+from platformio import __version__
+
+# pylint: disable=unused-import
+from platformio.device.list.util import list_serial_ports as get_serial_ports
+from platformio.fs import cd, load_json
+from platformio.proc import exec_command
+
+# pylint: enable=unused-import
+
+# also export list_serial_ports as get_serialports to be
+# backward compatibility with arduinosam versions 3.9.0 to 3.5.0 (and possibly others)
+get_serialports = get_serial_ports
 
 
-class memoized(object):
+class memoized:
     def __init__(self, expire=0):
         expire = str(expire)
         if expire.isdigit():
@@ -44,7 +48,7 @@ class memoized(object):
         self.cache = {}
 
     def __call__(self, func):
-        @wraps(func)
+        @functools.wraps(func)
         def wrapper(*args, **kwargs):
             key = str(args) + str(kwargs)
             if key not in self.cache or (
@@ -60,21 +64,64 @@ class memoized(object):
         self.cache.clear()
 
 
-class throttle(object):
-    def __init__(self, threshhold):
-        self.threshhold = threshhold  # milliseconds
+class throttle:
+    def __init__(self, threshold):
+        self.threshold = threshold  # milliseconds
         self.last = 0
 
     def __call__(self, func):
-        @wraps(func)
+        @functools.wraps(func)
         def wrapper(*args, **kwargs):
             diff = int(round((time.time() - self.last) * 1000))
-            if diff < self.threshhold:
-                time.sleep((self.threshhold - diff) * 0.001)
+            if diff < self.threshold:
+                time.sleep((self.threshold - diff) * 0.001)
             self.last = time.time()
             return func(*args, **kwargs)
 
         return wrapper
+
+
+# Retry: Begin
+
+
+class RetryException(Exception):
+    pass
+
+
+class RetryNextException(RetryException):
+    pass
+
+
+class RetryStopException(RetryException):
+    pass
+
+
+class retry:
+    RetryNextException = RetryNextException
+    RetryStopException = RetryStopException
+
+    def __init__(self, timeout=0, step=0.25):
+        self.timeout = timeout
+        self.step = step
+
+    def __call__(self, func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            elapsed = 0
+            while True:
+                try:
+                    return func(*args, **kwargs)
+                except self.RetryNextException:
+                    pass
+                if elapsed >= self.timeout:
+                    raise self.RetryStopException()
+                elapsed += self.step
+                time.sleep(self.step)
+
+        return wrapper
+
+
+# Retry: End
 
 
 def singleton(cls):
@@ -90,145 +137,21 @@ def singleton(cls):
 
 
 def get_systype():
-    type_ = platform.system().lower()
+    # allow manual override, eg. for
+    # windows on arm64 systems with emulated x86
+    if "PLATFORMIO_SYSTEM_TYPE" in os.environ:
+        return os.environ.get("PLATFORMIO_SYSTEM_TYPE")
+
+    system = platform.system().lower()
     arch = platform.machine().lower()
-    if type_ == "windows" and "x86" in arch:
-        arch = "amd64" if "64" in arch else "x86"
-    return "%s_%s" % (type_, arch) if arch else type_
-
-
-def get_serial_ports(filter_hwid=False):
-    try:
-        # pylint: disable=import-outside-toplevel
-        from serial.tools.list_ports import comports
-    except ImportError:
-        raise exception.GetSerialPortsError(os.name)
-
-    result = []
-    for p, d, h in comports():
-        if not p:
-            continue
-        if not filter_hwid or "VID:PID" in h:
-            result.append({"port": p, "description": d, "hwid": h})
-
-    if filter_hwid:
-        return result
-
-    # fix for PySerial
-    if not result and IS_MACOS:
-        for p in glob("/dev/tty.*"):
-            result.append({"port": p, "description": "n/a", "hwid": "n/a"})
-    return result
-
-
-# Backward compatibility for PIO Core <3.5
-get_serialports = get_serial_ports
-
-
-def get_logical_devices():
-    items = []
-    if IS_WINDOWS:
-        try:
-            result = proc.exec_command(
-                ["wmic", "logicaldisk", "get", "name,VolumeName"]
-            ).get("out", "")
-            devicenamere = re.compile(r"^([A-Z]{1}\:)\s*(\S+)?")
-            for line in result.split("\n"):
-                match = devicenamere.match(line.strip())
-                if not match:
-                    continue
-                items.append({"path": match.group(1) + "\\", "name": match.group(2)})
-            return items
-        except WindowsError:  # pylint: disable=undefined-variable
-            pass
-        # try "fsutil"
-        result = proc.exec_command(["fsutil", "fsinfo", "drives"]).get("out", "")
-        for device in re.findall(r"[A-Z]:\\", result):
-            items.append({"path": device, "name": None})
-        return items
-
-    result = proc.exec_command(["df"]).get("out")
-    devicenamere = re.compile(r"^/.+\d+\%\s+([a-z\d\-_/]+)$", flags=re.I)
-    for line in result.split("\n"):
-        match = devicenamere.match(line.strip())
-        if not match:
-            continue
-        items.append({"path": match.group(1), "name": os.path.basename(match.group(1))})
-    return items
-
-
-def get_mdns_services():
-    class mDNSListener(object):
-        def __init__(self):
-            self._zc = zeroconf.Zeroconf(interfaces=zeroconf.InterfaceChoice.All)
-            self._found_types = []
-            self._found_services = []
-
-        def __enter__(self):
-            zeroconf.ServiceBrowser(
-                self._zc,
-                [
-                    "_http._tcp.local.",
-                    "_hap._tcp.local.",
-                    "_services._dns-sd._udp.local.",
-                ],
-                self,
-            )
-            return self
-
-        def __exit__(self, etype, value, traceback):
-            self._zc.close()
-
-        def add_service(self, zc, type_, name):
-            try:
-                assert zeroconf.service_type_name(name)
-                assert str(name)
-            except (AssertionError, UnicodeError, zeroconf.BadTypeInNameException):
-                return
-            if name not in self._found_types:
-                self._found_types.append(name)
-                zeroconf.ServiceBrowser(self._zc, name, self)
-            if type_ in self._found_types:
-                s = zc.get_service_info(type_, name)
-                if s:
-                    self._found_services.append(s)
-
-        def remove_service(self, zc, type_, name):
-            pass
-
-        def update_service(self, zc, type_, name):
-            pass
-
-        def get_services(self):
-            return self._found_services
-
-    items = []
-    with mDNSListener() as mdns:
-        time.sleep(3)
-        for service in mdns.get_services():
-            properties = None
-            if service.properties:
-                try:
-                    properties = {
-                        k.decode("utf8"): v.decode("utf8")
-                        if isinstance(v, bytes)
-                        else v
-                        for k, v in service.properties.items()
-                    }
-                    json.dumps(properties)
-                except UnicodeDecodeError:
-                    properties = None
-
-            items.append(
-                {
-                    "type": service.type,
-                    "name": service.name,
-                    "ip": ", ".join(service.parsed_addresses()),
-                    "port": service.port,
-                    "properties": properties,
-                }
-            )
-    return items
+    if system == "windows":
+        if not arch:  # issue #4353
+            arch = "x86_" + platform.architecture()[0]
+        if "x86" in arch:
+            arch = "amd64" if "64" in arch else "x86"
+    if arch == "aarch64" and platform.architecture()[0] == "32bit":
+        arch = "armv7l"
+    return "%s_%s" % (system, arch) if arch else system
 
 
 def pioversion_to_intstr():
@@ -252,10 +175,9 @@ def items_in_list(needle, haystack):
     return set(needle) & set(haystack)
 
 
-def parse_date(datestr):
-    if "T" in datestr and "Z" in datestr:
-        return time.strptime(datestr, "%Y-%m-%dT%H:%M:%SZ")
-    return time.strptime(datestr)
+def parse_datetime(datestr):
+    assert "T" in datestr and "Z" in datestr
+    return datetime.datetime.strptime(datestr, "%Y-%m-%dT%H:%M:%SZ")
 
 
 def merge_dicts(d1, d2, path=None):
@@ -269,10 +191,10 @@ def merge_dicts(d1, d2, path=None):
     return d1
 
 
-def print_labeled_bar(label, is_error=False, fg=None):
-    terminal_width, _ = shutil.get_terminal_size()
+def print_labeled_bar(label, is_error=False, fg=None, sep="="):
+    terminal_width = shutil.get_terminal_size().columns
     width = len(click.unstyle(label))
-    half_line = "=" * int((terminal_width - width - 2) / 2)
+    half_line = sep * int((terminal_width - width - 2) / 2)
     click.secho("%s %s %s" % (half_line, label, half_line), fg=fg, err=is_error)
 
 
@@ -286,3 +208,8 @@ def humanize_duration_time(duration):
         tokens.append(int(round(duration) if multiplier == 1 else fraction))
         duration -= fraction * multiplier
     return "{:02d}:{:02d}:{:02d}.{:03d}".format(*tokens)
+
+
+def strip_ansi_codes(text):
+    # pylint: disable=protected-access
+    return click._compat.strip_ansi(text)

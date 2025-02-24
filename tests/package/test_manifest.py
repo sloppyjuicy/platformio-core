@@ -28,7 +28,7 @@ def test_library_json_parser():
     contents = """
 {
     "name": "TestPackage",
-    "keywords": "kw1, KW2, kw3, KW2",
+    "keywords": "kw1, KW2, kw3, KW2, kw 4, kw_5, kw-6",
     "headers": "include1.h, Include2.hpp",
     "platforms": ["atmelavr", "espressif"],
     "repository": {
@@ -62,7 +62,7 @@ def test_library_json_parser():
                 "url": "https://github.com/username/repo.git",
             },
             "export": {"exclude": [".gitignore", "tests"], "include": ["mylib"]},
-            "keywords": ["kw1", "kw2", "kw3"],
+            "keywords": ["kw1", "kw2", "kw3", "kw 4", "kw_5", "kw-6"],
             "headers": ["include1.h", "Include2.hpp"],
             "homepage": "http://old.url.format",
             "build": {"flags": ["-DHELLO"]},
@@ -322,6 +322,9 @@ def test_library_json_schema():
   "frameworks": "arduino",
   "platforms": "*",
   "license": "MIT",
+  "scripts": {
+      "postinstall": "script.py"
+  },
   "examples": [
     {
         "name": "JsonConfigFile",
@@ -372,6 +375,7 @@ def test_library_json_schema():
             "frameworks": ["arduino"],
             "platforms": ["*"],
             "license": "MIT",
+            "scripts": {"postinstall": "script.py"},
             "examples": [
                 {
                     "name": "JsonConfigFile",
@@ -423,6 +427,25 @@ def test_library_json_schema():
                     "frameworks": ["arduino"],
                 }
             ],
+        },
+    )
+
+    # test multiple licenses
+    contents = """
+{
+    "name": "MultiLicense",
+    "version": "1.0.0",
+    "license": "MIT AND (LGPL-2.1-or-later OR BSD-3-Clause)"
+}
+"""
+    raw_data = parser.LibraryJsonManifestParser(contents).as_dict()
+    data = ManifestSchema().load_manifest(raw_data)
+    assert not jsondiff.diff(
+        data,
+        {
+            "name": "MultiLicense",
+            "version": "1.0.0",
+            "license": "MIT AND (LGPL-2.1-or-later OR BSD-3-Clause)",
         },
     )
 
@@ -508,9 +531,9 @@ includes=MozziGuts.h
     errors = None
     try:
         ManifestSchema().load_manifest(raw_data)
-    except ManifestValidationError as e:
-        data = e.valid_data
-        errors = e.messages
+    except ManifestValidationError as exc:
+        data = exc.valid_data
+        errors = exc.messages
 
     assert errors["authors"]
 
@@ -859,6 +882,11 @@ def test_broken_schemas():
         ManifestValidationError, match=("Invalid semantic versioning format")
     ):
         ManifestSchema().load_manifest(dict(name="MyPackage", version="broken_version"))
+    # version with leading zeros
+    with pytest.raises(
+        ManifestValidationError, match=("Invalid semantic versioning format")
+    ):
+        ManifestSchema().load_manifest(dict(name="MyPackage", version="01.02.00"))
 
     # broken value for Nested
     with pytest.raises(ManifestValidationError, match=r"authors.*Invalid input type"):
@@ -873,5 +901,5 @@ def test_broken_schemas():
         )
 
     # invalid package name
-    with pytest.raises(ManifestValidationError, match=("are not allowed")):
+    with pytest.raises(ManifestValidationError, match="are not allowed"):
         ManifestSchema().load_manifest(dict(name="C/C++ :library", version="1.2.3"))

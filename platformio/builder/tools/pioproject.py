@@ -12,9 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from __future__ import absolute_import
-
-from platformio.project.config import MISSING, ProjectConfig, ProjectOptions
+from platformio.compat import MISSING
+from platformio.project.config import ProjectConfig
 
 
 def GetProjectConfig(env):
@@ -30,15 +29,17 @@ def GetProjectOption(env, option, default=MISSING):
 
 
 def LoadProjectOptions(env):
-    for option, value in env.GetProjectOptions():
-        option_meta = ProjectOptions.get("env." + option)
+    config = env.GetProjectConfig()
+    section = "env:" + env["PIOENV"]
+    for option in config.options(section):
+        option_meta = config.find_option_meta(section, option)
         if (
             not option_meta
             or not option_meta.buildenvvar
             or option_meta.buildenvvar in env
         ):
             continue
-        env[option_meta.buildenvvar] = value
+        env[option_meta.buildenvvar] = config.get(section, option)
 
 
 def exists(_):

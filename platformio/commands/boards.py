@@ -22,7 +22,7 @@ from platformio import fs
 from platformio.package.manager.platform import PlatformPackageManager
 
 
-@click.command("boards", short_help="Embedded board explorer")
+@click.command("boards", short_help="Board Explorer")
 @click.argument("query", required=False)
 @click.option("--installed", is_flag=True)
 @click.option("--json-output", is_flag=True)
@@ -41,8 +41,8 @@ def cli(query, installed, json_output):  # pylint: disable=R0912
             grpboards[board["platform"]] = []
         grpboards[board["platform"]].append(board)
 
-    terminal_width, _ = shutil.get_terminal_size()
-    for (platform, boards) in sorted(grpboards.items()):
+    terminal_width = shutil.get_terminal_size().columns
+    for platform, boards in sorted(grpboards.items()):
         click.echo("")
         click.echo("Platform: ", nl=False)
         click.secho(platform, bold=True)

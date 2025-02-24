@@ -12,13 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from __future__ import absolute_import
-
 import os
 import sys
 
 from SCons.Script import ARGUMENTS  # pylint: disable=import-error
 from SCons.Script import COMMAND_LINE_TARGETS  # pylint: disable=import-error
+from SCons.Script import DefaultEnvironment  # pylint: disable=import-error
 
 from platformio import fs, util
 from platformio.compat import IS_MACOS, IS_WINDOWS
@@ -32,14 +31,13 @@ from platformio.project.config import ProjectOptions
 
 
 @util.memoized()
-def PioPlatform(env):
-    variables = env.GetProjectOptions(as_dict=True)
-    if "framework" in variables:
-        # support PIO Core 3.0 dev/platforms
-        variables["pioframework"] = variables["framework"]
-    p = PlatformFactory.new(os.path.dirname(env["PLATFORM_MANIFEST"]))
-    p.configure_default_packages(variables, COMMAND_LINE_TARGETS)
-    return p
+def _PioPlatform():
+    env = DefaultEnvironment()
+    return PlatformFactory.from_env(env["PIOENV"], targets=COMMAND_LINE_TARGETS)
+
+
+def PioPlatform(_):
+    return _PioPlatform()
 
 
 def BoardConfig(env, board=None):
@@ -49,8 +47,8 @@ def BoardConfig(env, board=None):
             board = board or env.get("BOARD")
             assert board, "BoardConfig: Board is not defined"
             return p.board_config(board)
-        except (AssertionError, UnknownBoard) as e:
-            sys.stderr.write("Error: %s\n" % str(e))
+        except (AssertionError, UnknownBoard) as exc:
+            sys.stderr.write("Error: %s\n" % str(exc))
             env.Exit(1)
     return None
 
@@ -77,9 +75,11 @@ def LoadPioPlatform(env):
             continue
         env.PrependENVPath(
             "PATH",
-            os.path.join(pkg.path, "bin")
-            if os.path.isdir(os.path.join(pkg.path, "bin"))
-            else pkg.path,
+            (
+                os.path.join(pkg.path, "bin")
+                if os.path.isdir(os.path.join(pkg.path, "bin"))
+                else pkg.path
+            ),
         )
         if (
             not IS_WINDOWS
@@ -160,7 +160,7 @@ def PrintConfiguration(env):  # pylint: disable=too-many-statements
             and pkg_metadata
             and pkg_metadata.spec.external
         ):
-            data.append("(%s)" % pkg_metadata.spec.url)
+            data.append("(%s)" % pkg_metadata.spec.uri)
         if board_config:
             data.extend([">", board_config.get("name")])
         return data
@@ -213,7 +213,7 @@ def PrintConfiguration(env):  # pylint: disable=too-many-statements
         data = []
         for item in platform.dump_used_packages():
             original_version = get_original_version(item["version"])
-            info = "%s %s" % (item["name"], item["version"])
+            info = "%s @ %s" % (item["name"], item["version"])
             extra = []
             if original_version:
                 extra.append(original_version)
